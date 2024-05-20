@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.13)
 
 # Multi config generators such as Visual Studio ignore CMAKE_BUILD_TYPE. Multi config generators are configured with
 # CMAKE_CONFIGURATION_TYPES, but limiting options in it completely removes such build options
@@ -18,6 +18,10 @@ project(Demos)
 option(ENABLE_PYTHON "Whether to build extension modules for Python demos" OFF)
 option(MULTICHANNEL_DEMO_USE_TBB "Use TBB-based threading in multichannel demos" OFF)
 option(MULTICHANNEL_DEMO_USE_NATIVE_CAM "Use native camera api in multichannel demos" OFF)
+
+# ROOT_FOLDER=/home/cssdesk/work/
+include_directories(${ROOT_FOLDER}/perfetto/sdk)
+add_library(perfetto STATIC ${ROOT_FOLDER}/perfetto/sdk/perfetto.cc)
 
 if(NOT BIN_FOLDER)
     string(TOLOWER ${CMAKE_SYSTEM_PROCESSOR} ARCH)
@@ -64,9 +68,10 @@ if(ARM AND NOT CMAKE_CROSSCOMPILING)
     add_compile_options(-march=armv7-a+fp)
 endif()
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
 
 function(add_demos_to_build)
     # check each passed demo subdirectory
@@ -121,6 +126,7 @@ macro(add_demo)
 
     # Create executable file from sources
     add_executable(${OMZ_DEMO_NAME} ${OMZ_DEMO_SOURCES} ${OMZ_DEMO_HEADERS})
+    target_compile_features(${OMZ_DEMO_NAME} PRIVATE cxx_std_17)
 
     if(WIN32)
         set_target_properties(${OMZ_DEMO_NAME} PROPERTIES COMPILE_PDB_NAME ${OMZ_DEMO_NAME})
@@ -131,7 +137,7 @@ macro(add_demo)
     endif()
 
     target_link_libraries(${OMZ_DEMO_NAME} PRIVATE ${OpenCV_LIBRARIES} openvino::runtime
-                                                    ${OMZ_DEMO_DEPENDENCIES} utils gflags)
+                                                    ${OMZ_DEMO_DEPENDENCIES} utils perfetto ${CMAKE_THREAD_LIBS_INIT})
 
     if(UNIX)
         target_link_libraries(${OMZ_DEMO_NAME} PRIVATE pthread)
@@ -141,7 +147,7 @@ endmacro()
 find_package(OpenCV REQUIRED COMPONENTS core highgui videoio imgproc imgcodecs)
 find_package(OpenVINO REQUIRED COMPONENTS Runtime)
 
-add_subdirectory(thirdparty/gflags)
+##add_subdirectory(thirdparty/gflags)
 add_subdirectory(common/cpp)
 
 find_package(OpenCV QUIET COMPONENTS gapi)
