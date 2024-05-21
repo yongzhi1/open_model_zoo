@@ -9,6 +9,14 @@
 #include <utils/common.hpp>
 #include <utils/slog.hpp>
 
+
+#include "trace_categories.h"
+
+//#include <chrono>
+//#include <fstream>
+#include <thread>
+
+
 namespace {
 constexpr char h_msg[] = "show this help message and exit";
 DEFINE_bool(h, false, h_msg);
@@ -111,6 +119,55 @@ void write_wav(const std::string& file_name, const RiffWaveHeader& wave_header, 
 }
 }  // namespace
 
+#include <perfetto.h>
+
+void InitializePerfetto() {
+  perfetto::TracingInitArgs args;
+  // The backends determine where trace events are recorded. For this example we
+  // are going to use the in-process tracing service, which only includes in-app
+  // events.
+  args.backends = perfetto::kInProcessBackend;
+
+  perfetto::Tracing::Initialize(args);
+  perfetto::TrackEvent::Register();
+}
+
+std::unique_ptr<perfetto::TracingSession> StartTracing() {
+  // The trace config defines which types of data sources are enabled for
+  // recording. In this example we just need the "track_event" data source,
+  // which corresponds to the TRACE_EVENT trace points.
+  perfetto::TraceConfig cfg;
+  cfg.add_buffers()->set_size_kb(1024);
+  auto* ds_cfg = cfg.add_data_sources()->mutable_config();
+  ds_cfg->set_name("track_event");
+
+  auto tracing_session = perfetto::Tracing::NewTrace();
+  tracing_session->Setup(cfg);
+  tracing_session->StartBlocking();
+  return tracing_session;
+}
+
+void StopTracing(std::unique_ptr<perfetto::TracingSession> tracing_session) {
+  // Make sure the last event is closed for this example.
+  perfetto::TrackEvent::Flush();
+
+  // Stop tracing and read the trace data.
+  tracing_session->StopBlocking();
+  std::vector<char> trace_data(tracing_session->ReadTraceBlocking());
+
+  // Write the result into a file.
+  // Note: To save memory with longer traces, you can tell Perfetto to write
+  // directly into a file by passing a file descriptor into Setup() above.
+  std::ofstream output;
+  output.open("example.pftrace", std::ios::out | std::ios::binary);
+  output.write(&trace_data[0], std::streamsize(trace_data.size()));
+  output.close();
+  PERFETTO_LOG(
+      "Trace written in example.pftrace file. To read this trace in "
+      "text form, run `./tools/traceconv text example.pftrace`");
+}
+
+
 int main(int argc, char* argv[]) {
     std::set_terminate(catcher);
     parse(argc, argv);
@@ -118,6 +175,16 @@ int main(int argc, char* argv[]) {
     slog::info << "Reading model: " << FLAGS_m << slog::endl;
     std::shared_ptr<ov::Model> model = core.read_model(FLAGS_m);
     logBasicModelInfo(model);
+
+    // TEST
+    InitializePerfetto();
+    auto tracing_session = StartTracing();
+
+    // Give a custom name for the traced process.
+    perfetto::ProcessTrack process_track = perfetto::ProcessTrack::Current();
+    perfetto::protos::gen::TrackDescriptor desc = process_track.Serialize();
+    desc.mutable_process()->set_process_name("Example");
+    perfetto::TrackEvent::SetTrackDescriptor(process_track, desc);
 
     ov::OutputVector inputs = model->inputs();
     ov::OutputVector outputs = model->outputs();
@@ -230,6 +297,7 @@ int main(int argc, char* argv[]) {
         }
 
         infer_request.infer();
+        TRACE_EVENT("rendering", "infer", "i", i);
 
         {
             // process output
@@ -253,5 +321,8 @@ int main(int argc, char* argv[]) {
         out_wave_s16[i] = (int16_t)(v * std::numeric_limits<int16_t>::max());
     }
     write_wav(FLAGS_o, wave_header, out_wave_s16);
+
+    StopTracing(std::move(tracing_session));
+
     return 0;
 }
