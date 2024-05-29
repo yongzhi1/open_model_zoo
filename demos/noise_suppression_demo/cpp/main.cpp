@@ -9,11 +9,8 @@
 #include <utils/common.hpp>
 #include <utils/slog.hpp>
 
-
 #include "trace_categories.h"
-
-//#include <chrono>
-//#include <fstream>
+#include <condition_variable>
 #include <thread>
 
 
@@ -117,55 +114,42 @@ void write_wav(const std::string& file_name, const RiffWaveHeader& wave_header, 
     out_wave.write((char*)&wave_header, sizeof(RiffWaveHeader));
     out_wave.write((char*)&(wave.front()), wave.size() * sizeof(int16_t));
 }
-}  // namespace
 
-#include <perfetto.h>
+//TEST
+class Observer : public perfetto::TrackEventSessionObserver {
+ public:
+  Observer() { perfetto::TrackEvent::AddSessionObserver(this); }
+  ~Observer() override { perfetto::TrackEvent::RemoveSessionObserver(this); }
+
+  void OnStart(const perfetto::DataSourceBase::StartArgs&) override {
+    std::unique_lock<std::mutex> lock(mutex);
+    cv.notify_one();
+  }
+
+  void WaitForTracingStart() {
+    PERFETTO_LOG("Waiting for tracing to start...");
+    std::unique_lock<std::mutex> lock(mutex);
+    cv.wait(lock, [] { return perfetto::TrackEvent::IsEnabled(); });
+    PERFETTO_LOG("Tracing started");
+  }
+
+  std::mutex mutex;
+  std::condition_variable cv;
+};
 
 void InitializePerfetto() {
   perfetto::TracingInitArgs args;
   // The backends determine where trace events are recorded. For this example we
-  // are going to use the in-process tracing service, which only includes in-app
-  // events.
-  args.backends = perfetto::kInProcessBackend;
+  // are going to use the system-wide tracing service, so that we can see our
+  // app's events in context with system profiling information.
+  args.backends = perfetto::kSystemBackend;
+  args.enable_system_consumer = false;
 
   perfetto::Tracing::Initialize(args);
   perfetto::TrackEvent::Register();
 }
 
-std::unique_ptr<perfetto::TracingSession> StartTracing() {
-  // The trace config defines which types of data sources are enabled for
-  // recording. In this example we just need the "track_event" data source,
-  // which corresponds to the TRACE_EVENT trace points.
-  perfetto::TraceConfig cfg;
-  cfg.add_buffers()->set_size_kb(1024);
-  auto* ds_cfg = cfg.add_data_sources()->mutable_config();
-  ds_cfg->set_name("track_event");
-
-  auto tracing_session = perfetto::Tracing::NewTrace();
-  tracing_session->Setup(cfg);
-  tracing_session->StartBlocking();
-  return tracing_session;
-}
-
-void StopTracing(std::unique_ptr<perfetto::TracingSession> tracing_session) {
-  // Make sure the last event is closed for this example.
-  perfetto::TrackEvent::Flush();
-
-  // Stop tracing and read the trace data.
-  tracing_session->StopBlocking();
-  std::vector<char> trace_data(tracing_session->ReadTraceBlocking());
-
-  // Write the result into a file.
-  // Note: To save memory with longer traces, you can tell Perfetto to write
-  // directly into a file by passing a file descriptor into Setup() above.
-  std::ofstream output;
-  output.open("example.pftrace", std::ios::out | std::ios::binary);
-  output.write(&trace_data[0], std::streamsize(trace_data.size()));
-  output.close();
-  PERFETTO_LOG(
-      "Trace written in example.pftrace file. To read this trace in "
-      "text form, run `./tools/traceconv text example.pftrace`");
-}
+}  // namespace
 
 
 int main(int argc, char* argv[]) {
@@ -178,13 +162,9 @@ int main(int argc, char* argv[]) {
 
     // TEST
     InitializePerfetto();
-    auto tracing_session = StartTracing();
 
-    // Give a custom name for the traced process.
-    perfetto::ProcessTrack process_track = perfetto::ProcessTrack::Current();
-    perfetto::protos::gen::TrackDescriptor desc = process_track.Serialize();
-    desc.mutable_process()->set_process_name("Example");
-    perfetto::TrackEvent::SetTrackDescriptor(process_track, desc);
+    Observer observer;
+    observer.WaitForTracingStart();
 
     ov::OutputVector inputs = model->inputs();
     ov::OutputVector outputs = model->outputs();
@@ -322,7 +302,7 @@ int main(int argc, char* argv[]) {
     }
     write_wav(FLAGS_o, wave_header, out_wave_s16);
 
-    StopTracing(std::move(tracing_session));
+    perfetto::TrackEvent::Flush();
 
     return 0;
 }
